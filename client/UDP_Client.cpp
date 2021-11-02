@@ -1,5 +1,6 @@
 // Simeon Wuthier
 // CS 5220, 11/03/21
+
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -18,36 +19,34 @@ using namespace std;
 #define MAXLEN 4096             // Size in bytes per frame
 #define FILENAME_SIZE 256       // File names greater than this are not allowed
 #define WINDOWSIZE 10           // Number of frames in the window
-using namespace std;
 
+// Socket
 int sd, maxBufferSize;
 struct sockaddr_in server_addr, client_addr;
 socklen_t server_len, client_len;
 
-void fatal(string str)
-{
+// Upon fatal error, gracefully terminate with a message
+void fatal(string str) {
     cout << "ERROR: " << str << endl;
     exit(1);
 }
 
-bool readFrame(int *seqNum, char *data, int *dataSize, bool *endOfTransmission, char *frame);
-void createAck(int seqNum, char *ack, bool error);
-void sendAck();
+// Encode an Ack into two bytes
+void serializeAck(int seqNum, char *ack, bool error);
+// Decode the data within a frame
+bool deserializeFrame(int *seqNum, char *data, int *dataSize, bool *endOfTransmission, char *frame);
+// Listen for acks (needs to be multithreaded)
+void handleAckMessages();
 
-char checksum(char *frame, int count)
-{
-    u_long sum = 0;
-    while (count--)
-    {
-        sum += *frame++;
-        if (sum & 0xFFFF0000)
-        {
-            sum &= 0xFFFF;
-            sum++;
-        }
+// Given an array, add all the bytes and take the last two-byte output as the hash
+char fastHash(char *array, int arrayLen) {
+    int merged = 0;
+    for(int i = 0; i < arrayLen; i++) {
+        merged += array[i];
     }
-    return (sum & 0xFFFF);
+    return merged & 0xFFFF;
 }
+
 
 
 
@@ -55,8 +54,7 @@ char checksum(char *frame, int count)
 
 
 // Client side needs: UDP_Client serverHostname fileName protocolType
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 
     if (argc != 4) fatal("Usage: \"UDP_Client serverHostname fileName protocolType\"");
     char *serverHostname = argv[1];
@@ -72,11 +70,11 @@ int main(int argc, char *argv[])
     if(protocolType == 1) {
         cout << endl;
         cout << endl;
-        cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << endl;
-        cout << "@@@@@            ARQ STOP-AND-WAIT           @@@@@" << endl;
-        cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << endl;
-        cout << "@@@@@            by Simeon Wuthier           @@@@@" << endl;
-        cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << endl;
+        cout << "==================================================" << endl;
+        cout << "=====            ARQ STOP-AND-WAIT           =====" << endl;
+        cout << "==================================================" << endl;
+        cout << "=====            by Simeon Wuthier           =====" << endl;
+        cout << "==================================================" << endl;
         cout << endl;
     } else if(protocolType == 2) {
         cout << endl;
@@ -107,8 +105,7 @@ int main(int argc, char *argv[])
 
     // Create the tocket
     sd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sd < 0)
-    {
+    if (sd < 0) {
         fatal("Socket initialization failed");
     }
     // Init the server data
@@ -119,8 +116,7 @@ int main(int argc, char *argv[])
     // Convert the hostname, windom.uccs.edu, into an address
     struct hostent * hp;
     hp = gethostbyname(serverHostname);
-    if (hp == NULL)
-    {
+    if (hp == NULL) {
         fatal("Can't get server's IP address");
     }
     bcopy(hp->h_addr, (char*) &server_addr.sin_addr, hp->h_length);
@@ -145,8 +141,7 @@ int main(int argc, char *argv[])
     cout << "Sending file name..." << endl;
     server_len = sizeof(server_addr);
 
-    if (sendto(sd, fileName, fileNameLen, 0, (struct sockaddr *) &server_addr, server_len) <= 0)
-    {
+    if (sendto(sd, fileName, fileNameLen, 0, (struct sockaddr *) &server_addr, server_len) <= 0) {
         fatal("Failed to send");
     }
 
@@ -160,37 +155,35 @@ int main(int argc, char *argv[])
      */
     if(protocolType == 1) {
         int bytesReceived = 0;
-        while (isReceiving)
-        {
+        while (isReceiving) {
             cout << "Listening for frame..." << endl;
             frameSize = recvfrom(sd, (char*) frame, MAXLEN + 10, MSG_WAITALL, (struct sockaddr *) &client_addr, &client_len);
-            frameError = readFrame(&numReceivedSeqNums, data, &dataSize, &endOfTransmission, frame);
+            frameError = !deserializeFrame(&numReceivedSeqNums, data, &dataSize, &endOfTransmission, frame);
             if(!frameError) {
                 bytesReceived += frameSize;
 
+                // Write the serialized frame data portion to file if the checksum hash matches
                 fwrite(data, 1, dataSize, file);
                 bufferNum += 1;
 
-                cout << "Received frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << endl;
-
                 // frameError is always false, therefore no NACKs exist
-                createAck(numReceivedSeqNums, ack, frameError);
-                cout << "Sending " << (frameError ? "NACK" : "ACK") << " for frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << "..." << endl;
+                serializeAck(numReceivedSeqNums, ack, frameError);
+                cout << "Received frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << (frameError ? "... INVALID" : ".") << endl;
+                cout << "    Sending " << (frameError ? "NACK" : "ACK") << " for frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << "..." << endl;
                 sendto(sd, ack, 2, 0, (const struct sockaddr *) &client_addr, client_len);
 
                 if(endOfTransmission) isReceiving = false;
             }
 
         }
-        cout << bytesReceived << " bytes received" << endl;
+        cout << bytesReceived << " bytes received!" << endl;
         fclose(file);
 
         // Now, we want to make sure that the server is certain that we're done, just in case the EOT message was not correupt
         // So continue sending ACKs for 1 second, then we can end
-        thread stdby_thread(sendAck);
+        thread stdby_thread(handleAckMessages);
         chrono::high_resolution_clock::time_point start_time = chrono::high_resolution_clock::now();
-        while (chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - start_time).count() < 1000)
-        {
+        while (chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - start_time).count() < 1000) {
             this_thread::sleep_for(chrono::milliseconds(10));
         }
         stdby_thread.detach();
@@ -203,73 +196,59 @@ int main(int argc, char *argv[])
      *  ARQ Selective Repeat
      */
     } else if(protocolType == 2) {
-        while (isReceiving)
-        {
+        while (isReceiving) {
             bufferSize = maxBufferSize;
             memset(buffer, 0, bufferSize);
 
             int receivedSeqCount = (int) maxBufferSize / MAXLEN;
             bool windowLog[WINDOWSIZE];
-            for (int i = 0; i < WINDOWSIZE; i++)
-            {
+            for (int i = 0; i < WINDOWSIZE; i++) {
                 windowLog[i] = false;
             }
             lastFrameReceived = -1;
             lastAcceptableFrame = lastFrameReceived + WINDOWSIZE;
 
             /*Receive current buffer with sliding window */
-            while (true)
-            {
+            while (true) {
                 cout << "Listening for frame..." << endl;
                 frameSize = recvfrom(sd, (char*) frame, MAXLEN + 10, MSG_WAITALL, (struct sockaddr *) &client_addr, &client_len);
-                frameError = readFrame(&numReceivedSeqNums, data, &dataSize, &endOfTransmission, frame);
+                frameError = !deserializeFrame(&numReceivedSeqNums, data, &dataSize, &endOfTransmission, frame);
 
-                cout << "Received frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << endl;
-
-                createAck(numReceivedSeqNums, ack, frameError);
-                cout << "Sending " << (frameError ? "NACK" : "ACK") << " for frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << "..." << endl;
+                serializeAck(numReceivedSeqNums, ack, frameError);
+                cout << "Received frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << (frameError ? "... INVALID" : ".") << endl;
+                cout << "    Sending " << (frameError ? "NACK" : "ACK") << " for frame #" << bufferNum * WINDOWSIZE + numReceivedSeqNums << "..." << endl;
                 sendto(sd, ack, 2, 0, (const struct sockaddr *) &client_addr, client_len);
 
-                if (numReceivedSeqNums <= lastAcceptableFrame)
-                {
-                    if (!frameError)
-                    {
-
+                if (numReceivedSeqNums <= lastAcceptableFrame) {
+                    if (!frameError) {
                         int bufferOffset = numReceivedSeqNums * MAXLEN;
 
-                        if (numReceivedSeqNums == lastFrameReceived + 1)
-                        {
+                        if (numReceivedSeqNums == lastFrameReceived + 1) {
                             memcpy(buffer + bufferOffset, data, dataSize);
 
                             int shift = 1;
-                            for (int i = 1; i < WINDOWSIZE; i++)
-                            {
+                            for (int i = 1; i < WINDOWSIZE; i++) {
                                 if (!windowLog[i]) break;
                                 shift += 1;
                             }
-                            for (int i = 0; i < WINDOWSIZE - shift; i++)
-                            {
+                            for (int i = 0; i < WINDOWSIZE - shift; i++) {
                                 windowLog[i] = windowLog[i + shift];
                             }
-                            for (int i = WINDOWSIZE - shift; i < WINDOWSIZE; i++)
-                            {
+                            for (int i = WINDOWSIZE - shift; i < WINDOWSIZE; i++) {
                                 windowLog[i] = false;
                             }
                             lastFrameReceived += shift;
                             lastAcceptableFrame = lastFrameReceived + WINDOWSIZE;
-                        }
-                        else if (numReceivedSeqNums > lastFrameReceived + 1)
-                        {
-                            if (!windowLog[numReceivedSeqNums - (lastFrameReceived + 1)])
-                            {
+                        
+                        } else if (numReceivedSeqNums > lastFrameReceived + 1) {
+                            if (!windowLog[numReceivedSeqNums - (lastFrameReceived + 1)]) {
                                 memcpy(buffer + bufferOffset, data, dataSize);
                                 windowLog[numReceivedSeqNums - (lastFrameReceived + 1)] = true;
                             }
                         }
 
                         /*Set max sequence to sequence of frame with endOfTransmission */
-                        if (endOfTransmission)
-                        {
+                        if (endOfTransmission) {
                             bufferSize = bufferOffset + dataSize;
                             receivedSeqCount = numReceivedSeqNums + 1;
                             isReceiving = false;
@@ -287,8 +266,9 @@ int main(int argc, char *argv[])
                 /*Move to next buffer if all frames in current buffer has been received */
                 if (lastFrameReceived >= receivedSeqCount - 1) break;
             }
-            cout << bufferNum * maxBufferSize + bufferSize << " bytes received" << endl;
+            cout << bufferNum * maxBufferSize + bufferSize << " bytes received!" << endl;
 
+            // Write the serialized frame data from buffer to file
             fwrite(buffer, 1, bufferSize, file);
             bufferNum += 1;
         }
@@ -296,10 +276,9 @@ int main(int argc, char *argv[])
 
         // Now, we want to make sure that the server is certain that we're done, just in case the EOT message was not correupt
         // So continue sending ACKs for 1 second, then we can end
-        thread stdby_thread(sendAck);
+        thread stdby_thread(handleAckMessages);
         chrono::high_resolution_clock::time_point start_time = chrono::high_resolution_clock::now();
-        while (chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - start_time).count() < 1000)
-        {
+        while (chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - start_time).count() < 1000) {
             this_thread::sleep_for(chrono::milliseconds(10));
         }
         stdby_thread.detach();
@@ -309,14 +288,15 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-void createAck(int seqNum, char *ack, bool error)
-{
+// Encode an Ack into two bytes
+void serializeAck(int seqNum, char *ack, bool error) {
     ack[0] = error ? 0 : 1; // Negated ACK (NACK)
     memcpy(ack + 1, &seqNum, 1);
 }
 
-bool readFrame(int *seqNum, char *data, int *dataSize, bool *endOfTransmission, char *frame)
-{
+// Decode the data within a frame
+// Returns true if valid, false if invalid
+bool deserializeFrame(int *seqNum, char *data, int *dataSize, bool *endOfTransmission, char *frame) {
     *endOfTransmission = frame[0] == 0 ? true : false;
     uint32_t _seqNum;
     memcpy(&_seqNum, frame + 1, 4);
@@ -327,11 +307,15 @@ bool readFrame(int *seqNum, char *data, int *dataSize, bool *endOfTransmission, 
     *dataSize = ntohl(_dataSize);
 
     memcpy(data, frame + 9, *dataSize);
-    return frame[*dataSize + 9] != checksum(frame, *dataSize + (int) 9);
+    char receivedChecksum = frame[*dataSize + 9];
+    char computedChecksum = fastHash(frame, *dataSize + 9);
+
+    //printf("Verifying frame hash: %x == %x\n", receivedChecksum, computedChecksum);
+    return receivedChecksum == computedChecksum;
 }
 
-void sendAck()
-{
+// Listen for acks (needs to be multithreaded)
+void handleAckMessages() {
     char frame[MAXLEN + 10];
     char data[MAXLEN];
     char ack[2];
@@ -343,13 +327,12 @@ void sendAck()
     bool endOfTransmission;
 
     /*Listen for frames and send ack */
-    while (true)
-    {
+    while (true) {
         frameSize = recvfrom(sd, (char*) frame, MAXLEN + 10,
             MSG_WAITALL, (struct sockaddr *) &client_addr, &client_len);
-        frameError = readFrame(&numReceivedSeqNums, data, &dataSize, &endOfTransmission, frame);
+        frameError = !deserializeFrame(&numReceivedSeqNums, data, &dataSize, &endOfTransmission, frame);
 
-        createAck(numReceivedSeqNums, ack, frameError);
+        serializeAck(numReceivedSeqNums, ack, frameError);
         sendto(sd, ack, 2, 0, (const struct sockaddr *) &client_addr, client_len);
     }
 }

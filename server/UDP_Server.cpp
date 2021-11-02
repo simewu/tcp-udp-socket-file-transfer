@@ -1,5 +1,6 @@
 // Simeon Wuthier
 // CS 5220, 11/03/21
+
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -21,48 +22,49 @@ using namespace std;
 #define WINDOWSIZE 10           // Number of frames in the window
 #define FRAMETIMEOUT 100        // Milliseconds to wait until re-sending frame
 
-int sd;
+int sd; // Socket
 struct sockaddr_in server_addr, client_addr;
 socklen_t server_len, client_len;
 
+// Window of received acks
 bool *windowReceivedLog;
 int maxBufferSize, lastAckedFrame, lastFrameSent;
-
+// Track the timestamps for frames and acks
 chrono::high_resolution_clock::time_point startTime, *windowSentTimeLog;
+// Keep the window safe from race conditions when multithreading
 mutex windowModificationMutex;
 
-void fatal(string str)
-{
+// Upon fatal error, gracefully terminate with a message
+void fatal(string str) {
     cout << "ERROR: " << str << endl;
     exit(1);
 }
 
 // lossProbability = 0% then no frames are dropped
 // lossProbability = 100% then all frames are dropped
-bool isFrameDropped(int lossProbability)
-{
+bool isFrameDropped(int lossProbability) {
     int r = 1 + rand() % 100; // 1 to 100
     return r <= lossProbability;
 }
 
-bool readAck(int *seqNum, bool *error, char *ack);
+// Encode an Ack into two bytes
+void serializeAck(int seqNum, char *ack, bool error);
+// Encode the data for packing into a frame
+int serializeFrame(bool endOfTransmission, int seqNum, char *frame, char *data, int dataSize);
+// Decode an Ack from two bytes
+bool deserializeAck(int *seqNum, bool *error, char *ack);
+// Listen for acks (needs to be multithreaded with mutex locks over the AckLogs)
 void handleAckMessages();
-int createFrame(bool endOfTransmission, int seqNum, char *frame, char *data, int dataSize);
 
-char checksum(char *frame, int count)
-{
-    u_long sum = 0;
-    while (count--)
-    {
-        sum += *frame++;
-        if (sum & 0xFFFF0000)
-        {
-            sum &= 0xFFFF;
-            sum++;
-        }
+// Given an array, add all the bytes and take the last two-byte output as the hash
+char fastHash(char *array, int arrayLen) {
+    int merged = 0;
+    for(int i = 0; i < arrayLen; i++) {
+        merged += array[i];
     }
-    return (sum & 0xFFFF);
+    return merged & 0xFFFF;
 }
+
 
 
 
@@ -72,8 +74,7 @@ char checksum(char *frame, int count)
 // Server-side needs: UDP_Server lossProbability protocolType
 // protocolType = 1 for lossProbability (1 to 100)
 // protocolType = 2 for protocolType (1 for ARQ stop-and-wait, 2 for ARQ selective repeat)
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 
     if (argc != 3) fatal("Usage: \"UDP_Server lossProbability protocolType\"");
 
@@ -84,11 +85,11 @@ int main(int argc, char *argv[])
     if(protocolType == 1) {
         cout << endl;
         cout << endl;
-        cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << endl;
-        cout << "@@@@@            ARQ STOP-AND-WAIT           @@@@@" << endl;
-        cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << endl;
-        cout << "@@@@@            by Simeon Wuthier           @@@@@" << endl;
-        cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << endl;
+        cout << "==================================================" << endl;
+        cout << "=====            ARQ STOP-AND-WAIT           =====" << endl;
+        cout << "==================================================" << endl;
+        cout << "=====            by Simeon Wuthier           =====" << endl;
+        cout << "==================================================" << endl;
         cout << endl;
     } else if(protocolType == 2) {
         cout << endl;
@@ -105,8 +106,7 @@ int main(int argc, char *argv[])
     maxBufferSize = MAXLEN * WINDOWSIZE;
 
     cout << "Creating socket..." << endl;
-    if ((sd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
-    {
+    if ((sd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         fatal("Can't create a socket");
     }
 
@@ -120,8 +120,7 @@ int main(int argc, char *argv[])
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     cout << "Binding name to socket..." << endl;
-    if (bind(sd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1)
-    {
+    if (bind(sd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1) {
         fatal("Can't bind name to socket");
     }
 
@@ -139,8 +138,9 @@ int main(int argc, char *argv[])
      */
     if(protocolType == 1) {
 
-        while (true)
-        {
+        while (true) {
+            // Clear the client to allow new requests
+            memset(&client_addr, 0, sizeof(client_addr));
             client_len = sizeof(client_addr);
             cout << "\nListening..." << endl;
             //windowModificationMutex.lock();
@@ -157,8 +157,7 @@ int main(int argc, char *argv[])
 
             cout << "Received file for reading: \"" << fileName << "\"" << endl;
 
-            if (access(fileName, F_OK) == -1)
-            {
+            if (access(fileName, F_OK) == -1) {
                 cout << "Error 404, file not found" << endl;
                 continue;   // Don't terminate the server
             }
@@ -182,27 +181,22 @@ int main(int argc, char *argv[])
 
             // Send file
             bool isSending = true;
-            while (isSending)
-            {
+            while (isSending) {
                 int bytesReadFromFile = fread(data, 1, MAXLEN, file);
 
-                if (bytesReadFromFile < MAXLEN)
-                {
+                if (bytesReadFromFile < MAXLEN) {
                     isSending = false;
-                }
-                else if (bytesReadFromFile == MAXLEN)
-                {
+                } else if (bytesReadFromFile == MAXLEN) {
                     // Read the next byte and check if it's EOF
                     char temp[1];
-                    if (fread(temp, 1, 1, file) == 0)
-                    {
+                    if (fread(temp, 1, 1, file) == 0) {
                         isSending = false;
                     }
                     int error = fseek(file, -1, SEEK_CUR);
                 }
                 totalBytes += bytesReadFromFile;
 
-                int frame_size = createFrame(!isSending, seqNum, frame, data, bytesReadFromFile);
+                int frameSize = serializeFrame(!isSending, seqNum, frame, data, bytesReadFromFile);
                 
                 bool isAwaitingResponse = true;
                 while(isAwaitingResponse) {
@@ -210,7 +204,7 @@ int main(int argc, char *argv[])
                     // Handle frame dropping in a lossy network
                     if(!isFrameDropped(lossProbability)) {
                         cout << "Sending frame #" << seqNum << " from bytes:[" << (totalBytes - bytesReadFromFile) << " to " << (totalBytes - 1) << "]" << endl;
-                        sendto(sd, frame, frame_size, 0, (const struct sockaddr *) &client_addr, client_len);   //sizeof(client_addr));
+                        sendto(sd, frame, frameSize, 0, (const struct sockaddr *) &client_addr, client_len);   //sizeof(client_addr));
                     } else {
                         cout << "Dropping frame #" << seqNum << " from bytes:[" << (totalBytes - bytesReadFromFile) << " to " << (totalBytes - 1) << "]" << endl;
                     }
@@ -218,7 +212,7 @@ int main(int argc, char *argv[])
                     int ackSize = recvfrom(sd, (char*) ack, 2, MSG_WAITALL, (struct sockaddr *) &client_addr, &client_len);
                     bool ackError = true;
                     if(ackSize > 0) {
-                        ackError = readAck(&receivedSeqNum, &ackNeg, ack);
+                        ackError = !deserializeAck(&receivedSeqNum, &ackNeg, ack);
                     }
                     if(!ackError && !ackNeg) {
                         // Success!
@@ -250,15 +244,15 @@ int main(int argc, char *argv[])
     } else if(protocolType == 2) {
 
         startTime = chrono::high_resolution_clock::now();
-        while (true)
-        {
+        while (true) {
+            // Clear the client to allow new requests
+            memset(&client_addr, 0, sizeof(client_addr));
             client_len = sizeof(client_addr);
             cout << "\nListening..." << endl;
             //windowModificationMutex.lock();
             char fileNameRaw[FILENAME_SIZE];
             int fileNameLen = recvfrom(sd, (char*) fileNameRaw, FILENAME_SIZE, MSG_WAITALL, (struct sockaddr *) &client_addr, &client_len);
-            if (fileNameLen <= 0)
-            {
+            if (fileNameLen <= 0) {
                 cout << "Got an invalid file name" << endl;
                 continue;   // Don't terminate the server
             }
@@ -270,8 +264,7 @@ int main(int argc, char *argv[])
 
             cout << "Received file for reading: \"" << fileName << "\"" << endl;
 
-            if (access(fileName, F_OK) == -1)
-            {
+            if (access(fileName, F_OK) == -1) {
                 fatal("Error 404, file not found");
                 continue;   // Don't terminate the server
             }
@@ -286,29 +279,24 @@ int main(int argc, char *argv[])
 
             char frame[MAXLEN + 10];    // 10 for the checksum
             char data[MAXLEN];
-            int frame_size;
+            int frameSize;
             int dataSize;
 
             // Send file
             bool isSending = true;
             int bufferNum = 0;
-            while (isSending)
-            {
+            while (isSending) {
 
                 cout << "Reading to buffer" << endl;
 
                 // Read part of file to buffer
                 bufferSize = fread(buffer, 1, maxBufferSize, file);
-                if (bufferSize < maxBufferSize)
-                {
+                if (bufferSize < maxBufferSize) {
                     isSending = false;
-                }
-                else if (bufferSize == maxBufferSize)
-                {
+                } else if (bufferSize == maxBufferSize) {
                     // Read the next byte and check if it's EOF
                     char temp[1];
-                    if (fread(temp, 1, 1, file) == 0)
-                    {
+                    if (fread(temp, 1, 1, file) == 0) {
                         isSending = false;
                     }
                     int error = fseek(file, -1, SEEK_CUR);
@@ -321,8 +309,7 @@ int main(int argc, char *argv[])
                 windowSentTimeLog = new chrono::high_resolution_clock::time_point[WINDOWSIZE];
                 windowReceivedLog = new bool[WINDOWSIZE];
                 bool windowSentLog[WINDOWSIZE];
-                for (int i = 0; i < WINDOWSIZE; i++)
-                {
+                for (int i = 0; i < WINDOWSIZE; i++) {
                     windowReceivedLog[i] = false;
                     windowSentLog[i] = false;
                 }
@@ -332,27 +319,22 @@ int main(int argc, char *argv[])
 
                 // Send current buffer with sliding window
                 bool isSendDone = false;
-                while (!isSendDone)
-                {
+                while (!isSendDone) {
 
                     windowModificationMutex.lock();
                     // If the first ack was received, attempt to shift the frame
-                    if (windowReceivedLog[0])
-                    {
+                    if (windowReceivedLog[0]) {
                         int shift = 1;
-                        for (int i = 1; i < WINDOWSIZE; i++)
-                        {
+                        for (int i = 1; i < WINDOWSIZE; i++) {
                             if (!windowReceivedLog[i]) break;
                             shift += 1;
                         }
-                        for (int i = 0; i < WINDOWSIZE - shift; i++)
-                        {
+                        for (int i = 0; i < WINDOWSIZE - shift; i++) {
                             windowSentLog[i] = windowSentLog[i + shift];
                             windowReceivedLog[i] = windowReceivedLog[i + shift];
                             windowSentTimeLog[i] = windowSentTimeLog[i + shift];
                         }
-                        for (int i = WINDOWSIZE - shift; i < WINDOWSIZE; i++)
-                        {
+                        for (int i = WINDOWSIZE - shift; i < WINDOWSIZE; i++) {
                             windowSentLog[i] = false;
                             windowReceivedLog[i] = false;
                         }
@@ -363,17 +345,14 @@ int main(int argc, char *argv[])
                     //this_thread::sleep_for(chrono::milliseconds(200));
 
                     // Send frames that has not been sent or has timed out
-                    for (int i = 0; i < WINDOWSIZE; i++)
-                    {
+                    for (int i = 0; i < WINDOWSIZE; i++) {
                         seqNum = lastAckedFrame + i + 1;
 
-                        if (seqNum < seqCount)
-                        {
+                        if (seqNum < seqCount) {
                             windowModificationMutex.lock();
 
                             int elapsedTime = chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - windowSentTimeLog[i]).count();
-                            if (!windowSentLog[i] || (!windowReceivedLog[i] && (elapsedTime > FRAMETIMEOUT)))
-                            {
+                            if (!windowSentLog[i] || (!windowReceivedLog[i] && (elapsedTime > FRAMETIMEOUT))) {
                                 int bufferOffset = seqNum * MAXLEN;
                                 dataSize = (bufferSize - bufferOffset < MAXLEN) ? (bufferSize - bufferOffset) : MAXLEN;
                                 memcpy(data, buffer + bufferOffset, dataSize);
@@ -381,13 +360,12 @@ int main(int argc, char *argv[])
                                 // Determine the end of transmission
                                 bool endOfTransmission = (seqNum == seqCount - 1) && (!isSending);
 
-
-                                frame_size = createFrame(endOfTransmission, seqNum, frame, data, dataSize);
+                                frameSize = serializeFrame(endOfTransmission, seqNum, frame, data, dataSize);
                                 
                                 // Handle frame dropping in a lossy network
                                 if(!isFrameDropped(lossProbability)) {
                                     cout << "Sending frame #" << bufferNum *WINDOWSIZE + seqNum << " from bytes:[" << bufferOffset << " to " << (bufferOffset + dataSize - 1) << "]" << endl;
-                                    sendto(sd, frame, frame_size, 0, (const struct sockaddr *) &client_addr, client_len);   //sizeof(client_addr));
+                                    sendto(sd, frame, frameSize, 0, (const struct sockaddr *) &client_addr, client_len);   //sizeof(client_addr));
                                 } else {
                                     cout << "Dropping frame #" << bufferNum *WINDOWSIZE + seqNum << " from bytes:[" << bufferOffset << " to " << (bufferOffset + dataSize - 1) << "]" << endl;
                                 }
@@ -397,8 +375,7 @@ int main(int argc, char *argv[])
 
                                 // Print the ACK frames that were received
                                 cout << "    ACK status: (";
-                                for (int i = 0; i < WINDOWSIZE; i++)
-                                {
+                                for (int i = 0; i < WINDOWSIZE; i++) {
                                     if (windowReceivedLog[i]) cout << "V ";
                                     else cout << "- ";
                                 }
@@ -430,18 +407,38 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-bool readAck(int *seqNum, bool *error, char *ack)
-{
-    *error = ack[0] == 0 ? true : false;
-    char net_seq_num;
-    memcpy(&net_seq_num, ack + 1, 1);
-    *seqNum = net_seq_num;  //ntohl(net_seq_num);
-    //cout << "ACK: " << (int)ack[0] << (int)ack[1] << endl;
-    return false;
+// Encode an Ack into two bytes
+void serializeAck(int seqNum, char *ack, bool error) {
+    ack[0] = error ? 0 : 1; // Negated ACK (NACK)
+    memcpy(ack + 1, &seqNum, 1);
 }
 
-void handleAckMessages()
-{
+// Encode the data for packing into a frame
+int serializeFrame(bool endOfTransmission, int seqNum, char *frame, char *data, int dataSize) {
+    frame[0] = endOfTransmission ? 0x0 : 0x1;
+    uint32_t _seqNum = htonl(seqNum);
+    uint32_t _dataSize = htonl(dataSize);
+    memcpy(frame + 1, &_seqNum, 4);
+    memcpy(frame + 5, &_dataSize, 4);
+    memcpy(frame + 9, data, dataSize);
+    frame[dataSize + 9] = fastHash(frame, dataSize + (int) 9);
+    //cout << "EOT: " << endOfTransmission << " Data: " << data << " Data Size: " << dataSize << endl;
+    return dataSize + (int) 10;
+}
+
+// Decode an Ack from two bytes
+// Returns true if valid, false if invalid
+bool deserializeAck(int *seqNum, bool *error, char *ack) {
+    *error = ack[0] == 0;
+    char _seqNum;
+    memcpy(&_seqNum, ack + 1, 1);
+    *seqNum = _seqNum;
+    //cout << "ACK: " << (int)ack[0] << (int)ack[1] << endl;
+    return true;
+}
+
+// Listen for acks (needs to be multithreaded with mutex locks over the AckLogs)
+void handleAckMessages() {
     char ack[2];
     bool ackError;
     bool ackNeg;
@@ -449,38 +446,20 @@ void handleAckMessages()
     int ackSize;
 
     // Listen for ack from reciever
-    while (true)
-    {
+    while (true) {
         ackSize = recvfrom(sd, (char*) ack, 2, MSG_WAITALL, (struct sockaddr *) &client_addr, &client_len);
-        ackError = readAck(&ackSeqNum, &ackNeg, ack);
+        ackError = !deserializeAck(&ackSeqNum, &ackNeg, ack);
 
         windowModificationMutex.lock();
-        if (!ackError && ackSeqNum > lastAckedFrame && ackSeqNum <= lastFrameSent)
-        {
-            if (!ackNeg)
-            {
+        if (!ackError && ackSeqNum > lastAckedFrame && ackSeqNum <= lastFrameSent) {
+            if (!ackNeg) {
                 //cout << "Received ACK" << endl;
                 windowReceivedLog[ackSeqNum - (lastAckedFrame + 1)] = true;
-            }
-            else
-            {
+            } else {
                 //cout << "Received NACK" << endl;
                 windowSentTimeLog[ackSeqNum - (lastAckedFrame + 1)] = startTime;
             }
         }
         windowModificationMutex.unlock();
     }
-}
-
-int createFrame(bool endOfTransmission, int seqNum, char *frame, char *data, int dataSize)
-{
-    frame[0] = endOfTransmission ? 0x0 : 0x1;
-    uint32_t net_seq_num = htonl(seqNum);
-    uint32_t net_data_size = htonl(dataSize);
-    memcpy(frame + 1, &net_seq_num, 4);
-    memcpy(frame + 5, &net_data_size, 4);
-    memcpy(frame + 9, data, dataSize);
-    frame[dataSize + 9] = checksum(frame, dataSize + (int) 9);
-    //cout << "EOT: " << endOfTransmission << " Data: " << data << " Data Size: " << dataSize << endl;
-    return dataSize + (int) 10;
 }

@@ -17,14 +17,12 @@ using namespace std;
 #define BUF_SIZE 4096 // block transfer size
 #define QUEUE_SIZE 10
 
-void fatal(string str)
-{
+void fatal(string str) {
   cout << "ERROR: " << str << endl;
   exit(1);
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
   int s, b, l, fd, sa, bytes, on = 1;
   // Buffer for outgoing file
   char buf[BUF_SIZE];
@@ -49,14 +47,12 @@ int main(int argc, char *argv[])
   if (b < 0) fatal("Failed to bind socket");
 
   l = listen(s, QUEUE_SIZE);  // Specify queue size
-  if (l < 0)
-  {
+  if (l < 0) {
     fatal("Failed to listen");
   }
 
   // Socket is now set up and bound. Wait for connection and process it.
-  while (1)
-  {
+  while (1) {
     cout << "\nListening..." << endl;
     sa = accept(s, 0, 0); // Block for connection request
     if (sa < 0) fatal("Failed to accept");
@@ -68,11 +64,9 @@ int main(int argc, char *argv[])
     fd = open(buf, O_RDONLY); // Open the file to be sent back
     if (fd < 0) fatal("Failed to open file");
 
-    while (1)
-    {
+    while (1) {
       bytes = read(fd, buf, BUF_SIZE);  // Read from file
-      if (bytes <= 0)
-      {
+      if (bytes <= 0) {
         cout << "End of file reached." << endl;
         break;  // Check for end of file
       }

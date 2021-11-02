@@ -15,8 +15,7 @@ using namespace std;
 #define SERVER_PORT 2060  // arbitrary, but client and server must agree
 #define BUF_SIZE 4096 // block transfer size
 
-void fatal(char *str)
-{
+void fatal(char *str) {
   cout << "ERROR: " << str << endl;
   exit(1);
 }
@@ -24,8 +23,7 @@ void fatal(char *str)
 // Arg1: Hostname
 // Arg2: Filename
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
   char *fileName = argv[2];
   FILE *fp = fopen(fileName, "w");
 
@@ -37,21 +35,18 @@ int main(int argc, char **argv)
   // holds IP address
   struct sockaddr_in channel;
 
-  if (argc != 3)
-  {
+  if (argc != 3) {
     fatal("Usage: client server-name file-name");
   }
 
   h = gethostbyname(argv[1]); // look up host's IP address
-  if (!h)
-  {
+  if (!h) {
     fatal("gethostbyname failed");
   }
 
   cout << "Creating socket..." << endl;
   s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (s < 0)
-  {
+  if (s < 0) {
     fatal("Failed to init socket");
   }
 
@@ -69,14 +64,12 @@ int main(int argc, char **argv)
   write(s, argv[2], strlen(fileName) + 1);
 
   // Go get the file and write it to standard output.
-  while (1)
-  {
+  while (1) {
     bytes = read(s, buf, BUF_SIZE); // read from socket
 
     cout << "Received " << bytes << " bytes!" << endl;
 
-    if (bytes <= 0)
-    {
+    if (bytes <= 0) {
       cout << "End of file reached." << endl;
       break;
     }
