@@ -181,12 +181,12 @@ int main(int argc, char *argv[]) {
 
         // Now, we want to make sure that the server is certain that we're done, just in case the EOT message was not correupt
         // So continue sending ACKs for 1 second, then we can end
-        thread stdby_thread(handleAckMessages);
+        thread endPaddingThread(handleAckMessages);
         chrono::high_resolution_clock::time_point start_time = chrono::high_resolution_clock::now();
         while (chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - start_time).count() < 1000) {
             this_thread::sleep_for(chrono::milliseconds(10));
         }
-        stdby_thread.detach();
+        endPaddingThread.detach();
 
 
 
@@ -276,12 +276,12 @@ int main(int argc, char *argv[]) {
 
         // Now, we want to make sure that the server is certain that we're done, just in case the EOT message was not correupt
         // So continue sending ACKs for 1 second, then we can end
-        thread stdby_thread(handleAckMessages);
+        thread endPaddingThread(handleAckMessages);
         chrono::high_resolution_clock::time_point start_time = chrono::high_resolution_clock::now();
         while (chrono::duration_cast<chrono::milliseconds > (chrono::high_resolution_clock::now() - start_time).count() < 1000) {
             this_thread::sleep_for(chrono::milliseconds(10));
         }
-        stdby_thread.detach();
+        endPaddingThread.detach();
     }
 
     cout << "Transmission complete." << endl;

@@ -166,7 +166,7 @@ int main(int argc, char *argv[]) {
             FILE *file = fopen(fileName, "rb");
             
 
-            // Timeout after X milliseconds
+            // Timeout after FRAMETIMEOUT milliseconds
             struct timeval tv;
             tv.tv_sec = 0;
             tv.tv_usec = FRAMETIMEOUT * 1000; // Milliseconds to microseconds
@@ -275,7 +275,7 @@ int main(int argc, char *argv[]) {
             int bufferSize;
 
             // Start thread to listen for ack
-            thread recv_thread(handleAckMessages);
+            thread receiverThread(handleAckMessages);
 
             char frame[MAXLEN + 10];    // 10 for the checksum
             char data[MAXLEN];
@@ -399,7 +399,7 @@ int main(int argc, char *argv[]) {
             fclose(file);
             delete[] windowReceivedLog;
             delete[] windowSentTimeLog;
-            recv_thread.detach();
+            receiverThread.detach();
         }
     }
 
