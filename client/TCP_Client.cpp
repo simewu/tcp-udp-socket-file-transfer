@@ -5,11 +5,11 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
-#include <string.h >  // memset
+#include <string.h>  // memset
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <unistd.h >  // close
-#include <stdlib.h >  // exit
+#include <unistd.h>  // close
+#include <stdlib.h>  // exit
 using namespace std;
 
 #define SERVER_PORT 2060  // arbitrary, but client and server must agree
